@@ -16,6 +16,15 @@
 var ws = new WebSocket('ws://' + location.host + '/groupcall');
 var participants = {};
 var name;
+var rtcPeer;
+var localstream;
+var sdpConstraints = {
+    'mandatory': {
+    'OfferToReceiveAudio': true,
+    'OfferToReceiveVideo': false
+  }
+};
+var remoteAudio;
 
 window.onbeforeunload = function() {
 	ws.close();
@@ -38,6 +47,9 @@ ws.onmessage = function(message) {
 	case 'receiveVideoAnswer':
 		receiveVideoResponse(parsedMessage);
 		break;
+	case 'answer_sdp':
+	    onAnswerSdp(parsedMessage.answer_sdp);
+	    break;
 	default:
 		console.error('Unrecognized message', parsedMessage);
 	}
@@ -51,12 +63,62 @@ function register() {
 	document.getElementById('join').style.display = 'none';
 	document.getElementById('room').style.display = 'block';
 
-	var message = {
-		id : 'joinRoom',
-		name : name,
-		room : room,
-	}
-	sendMessage(message);
+    remoteAudio = document.getElementById('remote_audio');
+
+    var servers = null;
+    var pcConstraints = {
+        'optional': []
+      };
+    rtcPeer = new RTCPeerConnection(servers, pcConstraints);
+    console.log('Created local peer connection object pc1');
+    rtcPeer.onicecandidate =  function(e) {
+        // candidate exists in e.candidate
+  		if (e.candidate)
+  			return;
+
+  		var offerSdp = rtcPeer.localDescription.sdp;
+		trace('Invoking SDP offer callback function');
+	    var message = {
+	    	id : 'joinRoom',
+	    	name : name,
+	    	room : room,
+	    	sdpOffer : offerSdp
+	    }
+	    sendMessage(message);
+    }
+
+//    rtcPeer.onaddstream = function(e) {
+//        attachMediaStream(remoteAudio, e.stream);
+//    };
+
+    getUserMedia({
+        audio: true,
+        video: false
+    }, function(stream) {
+        trace('Received local stream');
+        // Call the polyfill wrapper to attach the media stream to this element.
+        localstream = stream;
+        var audioTracks = localstream.getAudioTracks();
+        if (audioTracks.length > 0) {
+            trace('Using Audio device: ' + audioTracks[0].label);
+        }
+        rtcPeer.addStream(localstream);
+        trace('Adding Local Stream to peer connection');
+
+        rtcPeer.createOffer(function(offer) {
+            console.log('Created SDP offer');
+            rtcPeer.setLocalDescription(offer, function() {
+                console.log('Local description set');
+            });
+        }, function(e){
+            console.log(e);
+        });
+    }, function(e) {
+       alert('getUserMedia() error: ' + e.name);
+    });
+
+	var participant = new Participant(name);
+	participants[name] = participant;
 }
 
 function onNewParticipant(request) {
@@ -65,6 +127,23 @@ function onNewParticipant(request) {
 
 function receiveVideoResponse(result) {
 	participants[result.name].rtcPeer.processSdpAnswer(result.sdpAnswer);
+}
+
+function onAnswerSdp(sdpAnswer) {
+    var answer = new RTCSessionDescription({
+		type : 'answer',
+		sdp : sdpAnswer,
+	});
+
+	console.log('SDP answer received, setting remote description');
+	rtcPeer.setRemoteDescription(answer, function() {
+	    trace('Set remote description completed')
+    	var stream = rtcPeer.getRemoteStreams()[0];
+        attachMediaStream(remoteAudio, stream);
+//    	remoteAudio.src = URL.createObjectURL(stream);
+	}, function(e){
+	    trace('error: ' + e);
+	} );
 }
 
 function callResponse(message) {
@@ -77,24 +156,14 @@ function callResponse(message) {
 }
 
 function onExistingParticipants(msg) {
-	var constraints = {
-		audio : true,
-		video : {
-			mandatory : {
-				maxWidth : 320,
-				maxFrameRate : 15,
-				minFrameRate : 15
-			}
-		}
-	};
 	console.log(name + " registered in room " + room);
-	var participant = new Participant(name);
-	participants[name] = participant;
-	var video = participant.getVideoElement();
-	participant.rtcPeer = kurentoUtils.WebRtcPeer.startSendOnly(video,
-			participant.offerToReceiveVideo.bind(participant), null,
-			constraints);
-	msg.data.forEach(receiveVideo);
+//	var participant = new Participant(name);
+//	participants[name] = participant;
+//	var video = participant.getVideoElement();
+//	participant.rtcPeer = kurentoUtils.WebRtcPeer.startSendOnly(video,
+//			participant.offerToReceiveVideo.bind(participant), null,
+//			constraints);
+//	msg.data.forEach(receiveVideo);
 }
 
 function leaveRoom() {
@@ -115,9 +184,9 @@ function leaveRoom() {
 function receiveVideo(sender) {
 	var participant = new Participant(sender);
 	participants[sender] = participant;
-	var video = participant.getVideoElement();
-	participant.rtcPeer = kurentoUtils.WebRtcPeer.startRecvOnly(video,
-			participant.offerToReceiveVideo.bind(participant));
+//	var video = participant.getVideoElement();
+//	participant.rtcPeer = kurentoUtils.WebRtcPeer.startRecvOnly(video,
+//			participant.offerToReceiveVideo.bind(participant), {video:false,audio:true});
 }
 
 function onParticipantLeft(request) {
